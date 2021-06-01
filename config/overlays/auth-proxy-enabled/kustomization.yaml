@@ -1,0 +1,37 @@
+# The auth proxy (https://github.com/brancz/kube-rbac-proxy)
+# which protects your /metrics endpoint.
+
+bases:
+- ../../base
+
+# Adds namespace to all resources.
+namespace: istio-system
+
+# Value of this field is prepended to the
+# names of all resources, e.g. a deployment named
+# "wordpress" becomes "alices-wordpress".
+# Note that it should also match with the prefix (text before '-') of the namespace
+# field above.
+namePrefix: istio-operator-
+
+resources:
+- rbac/auth_proxy_service.yaml
+- rbac/auth_proxy_role.yaml
+- rbac/auth_proxy_role_binding.yaml
+
+patches:
+- manager_auth_proxy_patch.yaml
+
+vars:
+- name: SERVICE_NAME
+  objref:
+    kind: Service
+    name: controller-manager-service
+    apiVersion: v1
+- name: NAMESPACE
+  objref:
+    kind: StatefulSet
+    name: controller-manager
+    apiVersion: apps/v1
+  fieldref:
+    fieldpath: metadata.namespace

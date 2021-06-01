@@ -1,0 +1,199 @@
+version: 2.1
+orbs:
+  helm: banzaicloud/helm@0.0.8
+  docker: banzaicloud/docker@0.0.5
+
+executors:
+  helm311:
+    docker:
+      - image: ghcr.io/banzaicloud/helm:0.0.7
+
+commands:
+  publish-with-latests:
+    steps:
+      - docker/push:
+          registry: docker.io
+          image: banzaicloud/istio-operator
+          tag: ${CIRCLE_TAG}
+      - docker/push:
+          registry: ghcr.io
+          image: banzaicloud/istio-operator
+          tag: ${CIRCLE_TAG}
+      - docker/version-check:
+          version: ${CIRCLE_TAG}
+          halt: true
+      - run:
+          name: Publish latest
+          command: |
+            minor="$(echo ${CIRCLE_TAG} | cut -d '.' -f2)"
+            docker tag "banzaicloud/istio-operator:${CIRCLE_TAG}" "banzaicloud/istio-operator:latest-1.${minor}"
+            docker push "banzaicloud/istio-operator:latest-1.${minor}"
+            docker tag "banzaicloud/istio-operator:${CIRCLE_TAG}" "ghcr.io/banzaicloud/istio-operator:latest-1.${minor}"
+            docker push "ghcr.io/banzaicloud/istio-operator:latest-1.${minor}"
+
+            latest="$(git tag | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | cut -d '.' -f2 | sort -urn | head -n 1)"
+            if [ "${latest}" -eq "${minor}" ]; then
+              docker tag "banzaicloud/istio-operator:${CIRCLE_TAG}" "banzaicloud/istio-operator:latest"
+              docker push "banzaicloud/istio-operator:latest"
+              docker tag "banzaicloud/istio-operator:${CIRCLE_TAG}" "ghcr.io/banzaicloud/istio-operator:latest"
+              docker push "ghcr.io/banzaicloud/istio-operator:latest"
+            fi
+
+jobs:
+  build:
+    docker:
+      - image: circleci/golang:1.14
+
+    working_directory: /go/src/github.com/banzaicloud/istio-operator
+    steps:
+      - checkout
+
+      - restore_cache:
+          name: Restore build dependencies
+          keys:
+            - build-deps-v1-{{ .Branch }}-{{ checksum "scripts/download-deps.sh" }}
+
+      - restore_cache:
+          name: Restore dependencies
+          keys:
+            - vendor-v1-{{ .Branch }}-{{ checksum "go.sum" }}
+            - vendor-v1-{{ .Branch }}
+            - vendor-v1-master
+            - vendor-v1
+
+      - run:
+          name: Install dependencies
+          command: make vendor
+
+      - save_cache:
+          name: Save dependencies
+          key: vendor-v1-{{ .Branch }}-{{ checksum "go.sum" }}
+          paths:
+            - vendor/
+
+      - restore_cache:
+          name: Restore license cache
+          keys:
+            - licensei-v1-{{ .Branch }}-{{ checksum "go.sum" }}
+            - licensei-v1-{{ .Branch }}
+            - licensei-v1-master
+            - licensei-v1
+
+      - run:
+          name: Download license information for dependencies
+          command: make license-cache
+
+      - save_cache:
+          name: Save license cache
+          key: licensei-v1-{{ .Branch }}-{{ checksum "go.sum" }}
+          paths:
+            - .licensei.cache
+
+      - run:
+          name: Check dependency licenses
+          command: make license-check
+
+      - run:
+            name: Verify code generation
+            command: make verify-codegen
+
+      - run:
+          name: Build
+          command:
+            make generate
+
+      - run:
+          name: Run unit tests, linter, etc.
+          command: make check
+
+      - save_cache:
+          name: Save build dependencies
+          key: build-deps-v1-{{ .Branch }}-{{ checksum "scripts/download-deps.sh" }}
+          paths:
+            - bin/
+
+      - store_test_results:
+          path: build/
+      - store_artifacts:
+          path: build/
+
+  e2e-test:
+    machine:
+      image: ubuntu-2004:202010-01
+      resource_class: medium
+    parameters:
+      tag:
+        description: The docker image tag to use. The image will be built before the test, so it's mostly cosmetic.
+        type: string
+    steps:
+      - checkout
+      # TODO cache and restore downloaded tools
+      - run:
+          name: Setup E2E test env
+          command: make e2e-test-env
+      - run:
+          name: Run E2E test
+          command: make e2e-test E2E_TEST_TAG=<<parameters.tag>>
+      - run:
+          name: Compress E2E test dump
+          command: tar czf e2e-test-dump.tar.gz logs
+          when: always
+      - store_artifacts:
+          path: e2e-test-dump.tar.gz
+
+workflows:
+  version: 2
+  ci:
+    jobs:
+      - build
+
+      - docker/build:
+          name: Build docker image
+          executor: docker/machine-dlc
+          image: banzaicloud/istio-operator
+          tag: ${CIRCLE_BRANCH//\//-}
+          filters:
+            tags:
+              ignore: /.*/
+
+      - docker/custom-publish:
+          name: Publish tagged & latest docker image
+          executor: docker/machine-dlc
+          context:
+          - dockerhub
+          - github
+          image: banzaicloud/istio-operator
+          login:
+            - docker/login
+            - docker/ghcr-login
+          push:
+            - publish-with-latests
+          filters:
+            tags:
+              only: /^v?[0-9]+\.[0-9]+\.[0-9]+(?:-(?:dev|rc)\.[0-9]+)?$/
+            branches:
+              ignore: /.*/
+
+  e2e-test:
+    jobs:
+      - e2e-test:
+          tag: ${CIRCLE_BRANCH//\//-}
+
+  helm-chart:
+    jobs:
+      - helm/lint-chart:
+          executor: helm311
+          charts-dir: deploy/charts
+          filters:
+            tags:
+              ignore: /.*/
+
+      - helm/publish-chart:
+          context: helm
+          executor: helm311
+          charts-dir: deploy/charts
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /chart\/istio-operator\/\d+.\d+.\d+/

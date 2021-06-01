@@ -1,0 +1,19 @@
+apiVersion: istio.banzaicloud.io/v1beta1
+kind: Istio
+metadata:
+  labels:
+    controller-tools.k8s.io: "1.0"
+  name: multimesh-v19x
+spec:
+  version: "1.9.5"
+  global: false
+  meshPolicy:
+    mtlsMode: STRICT
+  multiMesh: true
+  istioCoreDNS:
+    enabled: true
+  citadel:
+    caSecretName: "cacerts"
+  proxy:
+    image: "gcr.io/istio-release/proxyv2:1.9.5"
+  jwtPolicy: "first-party-jwt"
